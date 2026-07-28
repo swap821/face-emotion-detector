@@ -114,6 +114,31 @@ def health():
     return jsonify({'status': 'healthy', 'model_loaded': MODEL is not None})
 
 
+from concurrent.futures import ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=4)
+
+def _process_frame_data(data):
+    img_data = base64.b64decode(data.split(',')[1] if ',' in data else data)
+    img = Image.open(BytesIO(img_data))
+    frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    
+    faces = detect_faces(frame)
+    results = []
+    
+    for (x, y, w, h, face_roi) in faces:
+        processed = preprocess_face(face_roi)
+        prediction = MODEL.predict(processed, verbose=0)[0]
+        emotion_idx = np.argmax(prediction)
+        confidence = float(prediction[emotion_idx])
+        info = get_emotion_info(emotion_idx)
+        results.append({
+            'emotion': info['name'],
+            'emoji': info['emoji'],
+            'confidence': round(confidence, 4),
+            'box': {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)}
+        })
+    return results
+
 @socketio.on('frame')
 def handle_frame(data):
     """WebSocket handler for real-time frames."""
@@ -122,26 +147,8 @@ def handle_frame(data):
         return
     
     try:
-        img_data = base64.b64decode(data.split(',')[1] if ',' in data else data)
-        img = Image.open(BytesIO(img_data))
-        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        
-        faces = detect_faces(frame)
-        results = []
-        
-        for (x, y, w, h, face_roi) in faces:
-            processed = preprocess_face(face_roi)
-            prediction = MODEL.predict(processed, verbose=0)[0]
-            emotion_idx = np.argmax(prediction)
-            confidence = float(prediction[emotion_idx])
-            info = get_emotion_info(emotion_idx)
-            results.append({
-                'emotion': info['name'],
-                'emoji': info['emoji'],
-                'confidence': round(confidence, 4),
-                'box': {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)}
-            })
-        
+        future = executor.submit(_process_frame_data, data)
+        results = future.result(timeout=2.0)
         emit('prediction', {'faces': len(results), 'results': results})
     except Exception as e:
         emit('error', {'message': str(e)})
